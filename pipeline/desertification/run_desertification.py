@@ -1,4 +1,3 @@
-import json
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -9,7 +8,7 @@ from operators import IntegralOperator2D, LaplacianOperator2D
 
 # Parameters
 B = float(input("Provide mortality rate B > 0: "))
-d_u, d_v = 1.0, 50.0              # diffusion rates
+d_u, d_v = 1.0, 10.0              # diffusion rates
 ht = 0.01                         # time step
 tol = 1e-2                        # convergence tolerance
 max_iter_steady_state = 100000    # convergence max iter
@@ -18,8 +17,8 @@ A_min = float(input("Provide minimal rainfall rate A < 2B: "))
 A_max = float(input("Provide maximal rainfall rate A > 2B: "))
 
 L = 20.                           # size of the investigated spatial domain
-K = 1000                          # grid size for rainfall bifurcation
-N = 80                            # grid size for the spatial domain (N x N)
+K = 100                          # grid size for rainfall bifurcation
+N = 40                            # grid size for the spatial domain (N x N)
 
 # 2D domain
 x_domain = np.linspace(-L, L, N)
@@ -107,5 +106,65 @@ for idx, A in enumerate(tqdm(A_values, desc="Analiza bifurkacji 2D")):
             biomass = u_new.mean()
             branch_results[A].append((biomass, u_new.copy(), v_new.copy()))
 
+animation_data = []
+for A in A_values:
+    if branch_results[A]:
+        biomass, u, v = branch_results[A][0]
+        if not np.isnan(biomass):
+            animation_data.append({'A': A,
+                                   'biomass': biomass,
+                                   'u': u.reshape((N, N)),
+                                   'v': v.reshape((N, N))})
 
+if not animation_data:
+    print("No numerical data was generated in this experiment")
+else:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    first_frame = animation_data[0]
+
+    max_u = max(np.max(frame['u']) for frame in animation_data)
+    max_v = max(np.max(frame['v']) for frame in animation_data)
+
+    im1 = axes[0].imshow(first_frame['u'], extent=[-L, L, -L, L],
+                        cmap='summer_r', origin='lower', vmin=0, vmax=max_u)
+    axes[0].set_title('Biomass density')
+    axes[0].set_xlabel('x')
+    axes[0].set_ylabel('y')
+    cb1 = fig.colorbar(im1, ax=axes[0])
+
+    im2 = axes[1].imshow(first_frame['v'], extent=[-L, L, -L, L],
+                        cmap='Blues', origin='lower', vmin=0, vmax=max_v)
+    axes[1].set_title('Water density')
+    axes[1].set_xlabel('x')
+    axes[1].set_ylabel('y')
+    cb2 = fig.colorbar(im2, ax=axes[1])
+
+    # Tytuł całej figury, który też będzie aktualizowany
+    fig_title = fig.suptitle('')
+
+    plt.tight_layout()
+
+    # 3. Definicja funkcji aktualizującej (co ma się dziać w każdej klatce)
+    def update(frame_index):
+        # Pobieramy dane dla bieżącej klatki
+        data = animation_data[frame_index]
+        u, v = data['u'], data['v']
+
+        im1.set_data(u)
+        im2.set_data(v)
+
+        title_text = (f'Water supply: A = {data["A"]:.3f} | '
+                      f'Average biomass: {data["biomass"]:.4f}')
+        fig_title.set_text(title_text)
+        return im1, im2, fig_title
+
+    ani = animation.FuncAnimation(fig, update, frames=len(animation_data),
+                                  interval=100, blit=True)
+
+    plt.close(fig) # Zamykamy statyczny wykres, żeby nie wyświetlił się podwójnie
+    plt.show()
+
+    print("Zapisywanie animacji do pliku... (może to potrwać)")
+    ani.save("bifurcation_animation.gif", writer='imagemagick', fps=10)
+    print("Animacja zapisana.")
 
