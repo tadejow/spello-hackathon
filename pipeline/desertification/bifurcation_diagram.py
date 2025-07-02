@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import json
 import tqdm
 
-with open("../../data/desertification/desertification_stats_precomputed.json", 'r') as f:
+with open("../../data/desertification/branch_results_transformed.json", 'r') as f:
     data = json.load(f)
 
 plt.figure(figsize=(5, 5))
@@ -25,4 +25,5 @@ plt.title('Desertification in the regime of shrinking water resources')
 plt.gca().invert_xaxis()
 plt.grid(True)
 plt.legend()
+plt.savefig("../../data/desertification/bifurcation_diagram.png")
 plt.show()
