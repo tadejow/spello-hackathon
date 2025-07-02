@@ -1,0 +1,3 @@
+Credits and license of the downloaded data.
+
+Data by OpenStreetMap® (https://www.openstreetmap.org/) Licensed Under Open Data Commons Open Database License (ODbL) (https://opendatacommons.org/licenses/odbl/)
