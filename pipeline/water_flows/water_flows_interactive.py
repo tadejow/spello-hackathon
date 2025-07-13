@@ -1,36 +1,42 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+from mpl_toolkits.mplot3d import Axes3D
 from scipy.ndimage import gaussian_filter
 from numba import njit, prange
-
-plt.ion()
+import imageio
+import os
 
 # --- Parametry ---
 GRID_SIZE = 200
 CLICK_SOURCE_AMOUNT = 0.3
 FLOW_FACTOR = 0.85
-PLOT_INTERVAL = 20
+PLOT_INTERVAL = 75
 WATER_VMAX = 0.3
 SINK_MARGIN = 12
-ELEVATION_RADIUS = 12
+ELEVATION_RADIUS = 25
+ELEVATION_STRENGTH = 0.08
+ELEVATION_STEPS = 40
+SIMULATION_STEPS = 20000
+FPS = 25
+ROTATION_FRAMES = 76  # 76 klatek na 380 stopni (5 stopni na klatkę)
 
 # --- Tryby kliknięcia ---
 MODE_RAISE = 0
 MODE_LOWER = 1
 MODE_SOURCE = 2
-MODE_NAMES = ['Podnoszenie terenu', 'Obniżanie terenu', 'Źródło wody']
 
 # --- Kierunki przepływu ---
-directions_dx = np.array([-1,-1,-1, 0, 0, 1, 1, 1], dtype=np.int32)
-directions_dy = np.array([-1, 0, 1,-1, 1,-1, 0, 1], dtype=np.int32)
+directions_dx = np.array([-1, -1, -1, 0, 0, 1, 1, 1], dtype=np.int32)
+directions_dy = np.array([-1, 0, 1, -1, 1, -1, 0, 1], dtype=np.int32)
+
 
 @njit(fastmath=True)
 def terrain_function(x, y):
     term1 = -1.2 * np.exp(-((y - 0.8 * np.tanh(0.5 * x)) ** 2) / 0.5)
     term2 = 1.5 * np.exp(-((x - 2) ** 2) / 4) * np.exp(-((y + 1.5) ** 2) / 2.5)
     return term1 + term2
+
 
 def create_terrain(n):
     x = np.linspace(-6, 6, n)
@@ -40,6 +46,7 @@ def create_terrain(n):
     T = gaussian_filter(T, sigma=0.8)
     T -= T.min()
     return X, Y, T
+
 
 @njit(parallel=True)
 def calculate_flow(water, H_smooth, flow_factor, outflow, inflow):
@@ -75,9 +82,25 @@ def calculate_flow(water, H_smooth, flow_factor, outflow, inflow):
                         inflow[ni, nj] += f
     return outflow, inflow
 
-def simulate_interactive_overlay():
-    click_mode = MODE_SOURCE  # początkowy tryb
 
+def apply_terrain_change(terrain, i, j, mode, radius=ELEVATION_RADIUS, strength=ELEVATION_STRENGTH):
+    for di in range(-radius, radius + 1):
+        for dj in range(-radius, radius + 1):
+            ni = i + di
+            nj = j + dj
+            if 0 <= ni < GRID_SIZE and 0 <= nj < GRID_SIZE:
+                d = np.sqrt(di ** 2 + dj ** 2) / radius
+                if d < 1.0:
+                    delta = (1 - d) * strength
+                    if mode == MODE_RAISE:
+                        terrain[ni, nj] += delta
+                    elif mode == MODE_LOWER:
+                        terrain[ni, nj] -= delta
+    return terrain
+
+
+def create_animation():
+    # Inicjalizacja terenu
     X, Y, terrain = create_terrain(GRID_SIZE)
     water = np.zeros_like(terrain)
     sources = np.zeros_like(water, dtype=bool)
@@ -85,102 +108,193 @@ def simulate_interactive_overlay():
     inflow = np.zeros_like(water)
     sinks = np.zeros_like(water, dtype=bool)
 
-    fig = plt.figure(figsize=(14, 7))
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.5, 1])
-    ax = fig.add_subplot(gs[0])
-    ax3d = fig.add_subplot(gs[1], projection='3d')
-    plt.subplots_adjust(right=0.9, bottom=0.15)
+    # Pozycje modyfikacji terenu
+    raise_pos = [GRID_SIZE // 3, GRID_SIZE // 3]
 
-    source_pos = [GRID_SIZE - 2, GRID_SIZE // 2]
+    # Początkowa i końcowa pozycja dla obniżania terenu (wzdłuż rzeki)
+    lower_start = [2 * GRID_SIZE // 3, GRID_SIZE // 4]
+    lower_end = [2 * GRID_SIZE // 3, 3 * GRID_SIZE // 4]
+
+    source_pos = [GRID_SIZE - 20, GRID_SIZE // 2]
+
+    # Konfiguracja źródła i pochłaniaczy
     sources[source_pos[0], source_pos[1]] = True
+    sinks[:, 0] = True
+    for di in range(-SINK_MARGIN, SINK_MARGIN + 1):
+        for dj in range(-SINK_MARGIN, SINK_MARGIN + 1):
+            ni = source_pos[0] + di
+            nj = source_pos[1] + dj
+            if 0 <= ni < GRID_SIZE and 0 <= nj < GRID_SIZE:
+                sinks[ni, nj] = False
 
-    def update_sinks():
-        sinks[:, :] = False
-        sinks[:, 0] = True  # tylko lewa krawędź to sink
-        # wyłącz pochłanianie w obszarze wokół źródła
-        for di in range(-SINK_MARGIN, SINK_MARGIN + 1):
-            for dj in range(-SINK_MARGIN, SINK_MARGIN + 1):
-                ni = source_pos[0] + di
-                nj = source_pos[1] + dj
-                if 0 <= ni < GRID_SIZE and 0 <= nj < GRID_SIZE:
-                    sinks[ni, nj] = False
+    # Przygotowanie figur dla dwóch osobnych GIF-ów
+    fig_2d = plt.figure(figsize=(10, 8))
+    ax_2d = fig_2d.add_subplot(111)
 
-    update_sinks()
+    fig_3d = plt.figure(figsize=(8, 6))
+    ax_3d = fig_3d.add_subplot(111, projection='3d')
 
-    is_dragging = [False]
-    terrain_changed_during_drag = [False]
+    frames_2d = []
+    frames_3d = []
 
-    def apply_terrain_change(i, j):
-        for di in range(-ELEVATION_RADIUS, ELEVATION_RADIUS + 1):
-            for dj in range(-ELEVATION_RADIUS, ELEVATION_RADIUS + 1):
-                ni = i + di
-                nj = j + dj
-                if 0 <= ni < GRID_SIZE and 0 <= nj < GRID_SIZE:
-                    d = np.sqrt(di ** 2 + dj ** 2) / ELEVATION_RADIUS
-                    if d < 1.0:
-                        delta = (1 - d) * 0.03
-                        if click_mode == MODE_RAISE:
-                            terrain[ni, nj] += delta
-                        elif click_mode == MODE_LOWER:
-                            terrain[ni, nj] -= delta
-        terrain_changed_during_drag[0] = True
+    # Funkcja do zapisywania klatek dla obu figur
+    def save_frames():
+        # Zapis dla widoku 2D
+        fig_2d.canvas.draw()
+        image_2d = np.frombuffer(fig_2d.canvas.tostring_rgb(), dtype='uint8')
+        image_2d = image_2d.reshape(fig_2d.canvas.get_width_height()[::-1] + (3,))
+        frames_2d.append(image_2d)
 
-    def on_press(event):
-        nonlocal click_mode
-        if event.inaxes != ax:
-            return
-        is_dragging[0] = True
-        if click_mode in [MODE_RAISE, MODE_LOWER]:
-            i = np.clip(np.argmin(np.abs(X[:, 0] - event.xdata)), 0, GRID_SIZE - 1)
-            j = np.clip(np.argmin(np.abs(Y[0, :] - event.ydata)), 0, GRID_SIZE - 1)
-            apply_terrain_change(i, j)
-        elif click_mode == MODE_SOURCE:
-            i = np.clip(np.argmin(np.abs(X[:, 0] - event.xdata)), 0, GRID_SIZE - 1)
-            j = np.clip(np.argmin(np.abs(Y[0, :] - event.ydata)), 0, GRID_SIZE - 1)
-            sources[:, :] = False
-            sources[i, j] = True
-            source_pos[0], source_pos[1] = i, j
-            update_sinks()
+        # Zapis dla widoku 3D
+        fig_3d.canvas.draw()
+        image_3d = np.frombuffer(fig_3d.canvas.tostring_rgb(), dtype='uint8')
+        image_3d = image_3d.reshape(fig_3d.canvas.get_width_height()[::-1] + (3,))
+        frames_3d.append(image_3d)
 
-    def on_release(event):
-        is_dragging[0] = False
-        if terrain_changed_during_drag[0]:
-            nonlocal terrain
-            terrain = gaussian_filter(terrain, sigma=0.8)
-            terrain_changed_during_drag[0] = False
+    # 1. Initial terrain
+    ax_2d.clear()
+    cs = ax_2d.contour(X, Y, terrain, colors='gray', linewidths=0.5)
+    ax_2d.clabel(cs, inline=True, fontsize=6, fmt="%.1f")
+    ax_2d.set_title('Initial Terrain')
+    ax_2d.set_aspect('equal')
+    ax_2d.set_xlim(X.min(), X.max())
+    ax_2d.set_ylim(Y.min(), Y.max())
 
-    def on_motion(event):
-        nonlocal click_mode
-        if not is_dragging[0]:
-            return
-        if event.inaxes != ax:
-            return
-        if click_mode in [MODE_RAISE, MODE_LOWER]:
-            i = np.clip(np.argmin(np.abs(X[:, 0] - event.xdata)), 0, GRID_SIZE - 1)
-            j = np.clip(np.argmin(np.abs(Y[0, :] - event.ydata)), 0, GRID_SIZE - 1)
-            apply_terrain_change(i, j)
-        elif click_mode == MODE_SOURCE:
-            i = np.clip(np.argmin(np.abs(X[:, 0] - event.xdata)), 0, GRID_SIZE - 1)
-            j = np.clip(np.argmin(np.abs(Y[0, :] - event.ydata)), 0, GRID_SIZE - 1)
-            sources[:, :] = False
-            sources[i, j] = True
-            source_pos[0], source_pos[1] = i, j
-            update_sinks()
+    ax_3d.clear()
+    ax_3d.plot_surface(X, Y, terrain, cmap='terrain', edgecolor='none', alpha=0.9)
+    ax_3d.set_title('3D Topography')
+    ax_3d.set_xlabel('X')
+    ax_3d.set_ylabel('Y')
+    ax_3d.set_zlabel('Elevation')
+    ax_3d.set_xlim(X.min(), X.max())
+    ax_3d.set_ylim(Y.min(), Y.max())
+    ax_3d.set_zlim(terrain.min(), terrain.max())
+    ax_3d.set_box_aspect([np.ptp(X), np.ptp(Y), np.ptp(terrain)])
+    ax_3d.view_init(elev=30, azim=0)
 
-    def on_key(event):
-        nonlocal click_mode
-        if event.key == 'right':
-            click_mode = (click_mode + 1) % 3
-        elif event.key == 'left':
-            click_mode = (click_mode - 1) % 3
+    for _ in range(40):
+        save_frames()
 
-    fig.canvas.mpl_connect('button_press_event', on_press)
-    fig.canvas.mpl_connect('button_release_event', on_release)
-    fig.canvas.mpl_connect('motion_notify_event', on_motion)
-    fig.canvas.mpl_connect('key_press_event', on_key)
+    # 2. Raising terrain
+    for step in range(ELEVATION_STEPS):
+        terrain = apply_terrain_change(terrain, raise_pos[0], raise_pos[1], MODE_RAISE)
+        terrain = gaussian_filter(terrain, sigma=0.8)
 
-    step = 0
-    while True:
+        # Aktualizacja widoku 2D
+        ax_2d.clear()
+        cs = ax_2d.contour(X, Y, terrain, colors='gray', linewidths=0.5)
+        ax_2d.clabel(cs, inline=True, fontsize=6, fmt="%.1f")
+        ax_2d.scatter(X[raise_pos[0], raise_pos[1]], Y[raise_pos[0], raise_pos[1]],
+                      color='red', s=100, marker='^', alpha=0.7)
+        ax_2d.set_title(f'Raising Terrain: Step {step + 1}/{ELEVATION_STEPS}')
+        ax_2d.set_aspect('equal')
+        ax_2d.set_xlim(X.min(), X.max())
+        ax_2d.set_ylim(Y.min(), Y.max())
+
+        # Aktualizacja widoku 3D
+        ax_3d.clear()
+        ax_3d.plot_surface(X, Y, terrain, cmap='terrain', edgecolor='none', alpha=0.9)
+        ax_3d.set_title('3D Topography')
+        ax_3d.set_xlabel('X')
+        ax_3d.set_ylabel('Y')
+        ax_3d.set_zlabel('Elevation')
+        ax_3d.set_xlim(X.min(), X.max())
+        ax_3d.set_ylim(Y.min(), Y.max())
+        ax_3d.set_zlim(terrain.min(), terrain.max())
+        ax_3d.set_box_aspect([np.ptp(X), np.ptp(Y), np.ptp(terrain)])
+        ax_3d.view_init(elev=30, azim=0)
+
+        save_frames()
+
+    # Pause after raising terrain
+    for _ in range(40):
+        save_frames()
+
+    # 3. Lowering terrain (with moving cursor)
+    for step in range(ELEVATION_STEPS):
+        # Calculate current cursor position (movement along the river)
+        progress = step / (ELEVATION_STEPS - 1)
+        current_lower_x = lower_start[0] + (lower_end[0] - lower_start[0]) * progress
+        current_lower_y = lower_start[1] + (lower_end[1] - lower_start[1]) * progress
+
+        terrain = apply_terrain_change(terrain, int(current_lower_x), int(current_lower_y), MODE_LOWER)
+        terrain = gaussian_filter(terrain, sigma=0.8)
+
+        # Aktualizacja widoku 2D
+        ax_2d.clear()
+        cs = ax_2d.contour(X, Y, terrain, colors='gray', linewidths=0.5)
+        ax_2d.clabel(cs, inline=True, fontsize=6, fmt="%.1f")
+        ax_2d.scatter(X[raise_pos[0], raise_pos[1]], Y[raise_pos[0], raise_pos[1]],
+                      color='red', s=100, marker='^', alpha=0.7)
+        ax_2d.scatter(X[int(current_lower_x), int(current_lower_y)],
+                      Y[int(current_lower_x), int(current_lower_y)],
+                      color='blue', s=100, marker='v', alpha=0.7)
+        ax_2d.set_title(f'Lowering Terrain: Step {step + 1}/{ELEVATION_STEPS}')
+        ax_2d.set_aspect('equal')
+        ax_2d.set_xlim(X.min(), X.max())
+        ax_2d.set_ylim(Y.min(), Y.max())
+
+        # Aktualizacja widoku 3D
+        ax_3d.clear()
+        ax_3d.plot_surface(X, Y, terrain, cmap='terrain', edgecolor='none', alpha=0.9)
+        ax_3d.set_title('3D Topography')
+        ax_3d.set_xlabel('X')
+        ax_3d.set_ylabel('Y')
+        ax_3d.set_zlabel('Elevation')
+        ax_3d.set_xlim(X.min(), X.max())
+        ax_3d.set_ylim(Y.min(), Y.max())
+        ax_3d.set_zlim(terrain.min(), terrain.max())
+        ax_3d.set_box_aspect([np.ptp(X), np.ptp(Y), np.ptp(terrain)])
+        ax_3d.view_init(elev=30, azim=0)
+
+        save_frames()
+
+    # Long pause after terrain modifications
+    for _ in range(60):
+        save_frames()
+
+    # 4. Terrain rotation (380 degrees) - tylko w widoku 3D
+    for i in range(ROTATION_FRAMES):
+        azim = i * 380 / ROTATION_FRAMES
+
+        # Widok 2D - statyczny bez obrotu
+        ax_2d.clear()
+        cs = ax_2d.contour(X, Y, terrain, colors='gray', linewidths=0.5)
+        ax_2d.clabel(cs, inline=True, fontsize=6, fmt="%.1f")
+        ax_2d.scatter(X[raise_pos[0], raise_pos[1]], Y[raise_pos[0], raise_pos[1]],
+                      color='red', s=100, marker='^', alpha=0.3)
+        ax_2d.scatter(X[lower_end[0], lower_end[1]], Y[lower_end[0], lower_end[1]],
+                      color='blue', s=100, marker='v', alpha=0.3)
+        ax_2d.scatter(X[source_pos[0], source_pos[1]], Y[source_pos[0], source_pos[1]],
+                      color='red', s=70, marker='x', alpha=0.7)
+        ax_2d.set_title(f'Final Terrain')
+        ax_2d.set_aspect('equal')
+        ax_2d.set_xlim(X.min(), X.max())
+        ax_2d.set_ylim(Y.min(), Y.max())
+
+        # Widok 3D - obrót
+        ax_3d.clear()
+        ax_3d.plot_surface(X, Y, terrain, cmap='terrain', edgecolor='none', alpha=0.9)
+        ax_3d.set_title(f'3D Rotation: {int(azim)}°')
+        ax_3d.set_xlabel('X')
+        ax_3d.set_ylabel('Y')
+        ax_3d.set_zlabel('Elevation')
+        ax_3d.set_xlim(X.min(), X.max())
+        ax_3d.set_ylim(Y.min(), Y.max())
+        ax_3d.set_zlim(terrain.min(), terrain.max())
+        ax_3d.set_box_aspect([np.ptp(X), np.ptp(Y), np.ptp(terrain)])
+        ax_3d.view_init(elev=30, azim=azim)
+
+        save_frames()
+
+    # Pause before water simulation
+    for _ in range(60):
+        save_frames()
+
+    # 5. Water simulation
+    water_frames = 0
+    for step in range(SIMULATION_STEPS):
+        # Water update
         water[sources] += CLICK_SOURCE_AMOUNT
         H = terrain + water
         H_smooth = gaussian_filter(H, sigma=0.6)
@@ -191,37 +305,57 @@ def simulate_interactive_overlay():
         water[water < 1e-4] = 0.0
         water[sinks] = 0.0
 
+        # Save every 75 steps
         if step % PLOT_INTERVAL == 0:
-            # 2D widok
-            ax.clear()
-            cs = ax.contour(X, Y, terrain, colors='gray', linewidths=0.5)
-            ax.clabel(cs, inline=True, fontsize=6, fmt="%.1f")
+            water_frames += 1
+
+            # Widok 2D - z wodą
+            ax_2d.clear()
+            cs = ax_2d.contour(X, Y, terrain, colors='gray', linewidths=0.5)
+            ax_2d.clabel(cs, inline=True, fontsize=6, fmt="%.1f")
             wp = np.where(water > 0.005, water, np.nan)
-            ax.pcolormesh(X, Y, wp, cmap='Blues', shading='auto', vmin=0, vmax=WATER_VMAX, alpha=0.6)
-            ax.scatter(X[source_pos[0], source_pos[1]], Y[source_pos[0], source_pos[1]], color='red', s=50, marker='x')
-            ax.set_title(f'Krok {step} | Tryb: {MODE_NAMES[click_mode]}')
-            ax.set_aspect('equal')
-            ax.set_xlim(X.min(), X.max())
-            ax.set_ylim(Y.min(), Y.max())
-            ax.text(0.5, -0.08, 'Użyj strzałek ← i → do zmiany trybu (Podnoszenie, Obniżanie, Źródło wody)',
-                    ha='center', va='top', fontsize=10, transform=ax.transAxes)
+            ax_2d.pcolormesh(X, Y, wp, cmap='Blues', shading='auto', vmin=0, vmax=WATER_VMAX, alpha=0.6)
+            ax_2d.scatter(X[source_pos[0], source_pos[1]], Y[source_pos[0], source_pos[1]],
+                          color='red', s=70, marker='x')
+            ax_2d.scatter(X[raise_pos[0], raise_pos[1]], Y[raise_pos[0], raise_pos[1]],
+                          color='red', s=100, marker='^', alpha=0.3)
+            ax_2d.scatter(X[lower_end[0], lower_end[1]], Y[lower_end[0], lower_end[1]],
+                          color='blue', s=100, marker='v', alpha=0.3)
+            ax_2d.set_title(f'Water Simulation: Step {step}/{SIMULATION_STEPS}')
+            ax_2d.set_aspect('equal')
+            ax_2d.set_xlim(X.min(), X.max())
+            ax_2d.set_ylim(Y.min(), Y.max())
 
-            # 3D widok
-            ax3d.clear()
-            ax3d.plot_surface(X, Y, terrain, cmap='terrain', edgecolor='none', alpha=0.9)
-            ax3d.set_title('Topografia 3D (obróć myszką)')
-            ax3d.set_xlabel('X')
-            ax3d.set_ylabel('Y')
-            ax3d.set_zlabel('Wysokość')
-            ax3d.set_xlim(X.min(), X.max())
-            ax3d.set_ylim(Y.min(), Y.max())
-            ax3d.set_zlim(terrain.min(), terrain.max())
-            # Zachowujemy proporcje osi
-            ax3d.set_box_aspect([np.ptp(X), np.ptp(Y), np.ptp(terrain)])
+            # Widok 3D - tylko teren (bez wody)
+            ax_3d.clear()
+            ax_3d.plot_surface(X, Y, terrain, cmap='terrain', edgecolor='none', alpha=0.9)
+            ax_3d.set_title('3D Topography')
+            ax_3d.set_xlabel('X')
+            ax_3d.set_ylabel('Y')
+            ax_3d.set_zlabel('Elevation')
+            ax_3d.set_xlim(X.min(), X.max())
+            ax_3d.set_ylim(Y.min(), Y.max())
+            ax_3d.set_zlim(terrain.min(), terrain.max())
+            ax_3d.set_box_aspect([np.ptp(X), np.ptp(Y), np.ptp(terrain)])
+            ax_3d.view_init(elev=30, azim=0)
 
-            plt.pause(0.001)
+            save_frames()
 
-        step += 1
+    # Long final pause
+    for _ in range(80):
+        save_frames()
+
+    # Zapis animacji do dwóch osobnych plików GIF
+    imageio.mimsave('water_flow_2d.gif', frames_2d, fps=FPS)
+    imageio.mimsave('water_flow_3d.gif', frames_3d, fps=FPS)
+
+    # Zamknięcie figur
+    plt.close(fig_2d)
+    plt.close(fig_3d)
+
+    print(f"Animation saved as 'water_flow_2d.gif' and 'water_flow_3d.gif'")
+    print(f"2D frames: {len(frames_2d)}, 3D frames: {len(frames_3d)}")
+
 
 if __name__ == "__main__":
-    simulate_interactive_overlay()
+    create_animation()
