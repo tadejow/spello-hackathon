@@ -16,9 +16,9 @@ max_iter_steady_state = 100000    # convergence max iter
 A_min = float(input("Provide minimal rainfall rate A < 2B: "))
 A_max = float(input("Provide maximal rainfall rate A > 2B: "))
 
-L = 25.                            # size of the investigated spatial domain
-K = 100                            # grid size for rainfall bifurcation
-N = 100                            # grid size for the spatial domain (N x N)
+L = 20.                           # size of the investigated spatial domain
+K = 100                          # grid size for rainfall bifurcation
+N = 50                            # grid size for the spatial domain (N x N)
 
 # 2D domain
 x_domain = np.linspace(-L, L, N)
@@ -125,21 +125,15 @@ else:
     max_u = max(np.max(frame['u']) for frame in animation_data)
     max_v = max(np.max(frame['v']) for frame in animation_data)
 
-    im1 = axes[0].imshow(
-                        first_frame['u'], extent=[-L, L, -L, L],
-                        cmap='summer_r', origin='lower', 
-                        vmin=0, vmax=max_u
-                        )
+    im1 = axes[0].imshow(first_frame['u'], extent=[-L, L, -L, L],
+                        cmap='summer_r', origin='lower', vmin=0, vmax=max_u)
     axes[0].set_title('Biomass density')
     axes[0].set_xlabel('x')
     axes[0].set_ylabel('y')
     cb1 = fig.colorbar(im1, ax=axes[0])
 
-    im2 = axes[1].imshow(
-                        first_frame['v'], extent=[-L, L, -L, L],
-                        cmap='Blues', origin='lower',
-                        vmin=0, vmax=max_v
-                        )
+    im2 = axes[1].imshow(first_frame['v'], extent=[-L, L, -L, L],
+                        cmap='Blues', origin='lower', vmin=0, vmax=max_v)
     axes[1].set_title('Water density')
     axes[1].set_xlabel('x')
     axes[1].set_ylabel('y')
